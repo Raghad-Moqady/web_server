@@ -5,6 +5,15 @@ import { config } from "./config.js";
 import { errorHandler } from "./errorMiddleware.js";
 import { BadRequestError } from './customErrorClasses.js';
 
+// Automatic Migrations
+import postgres from "postgres";
+import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { drizzle } from "drizzle-orm/postgres-js";
+
+const migrationClient = postgres(config.db.url, { max: 1 });
+await migrate(drizzle(migrationClient), config.db.migrationConfig);
+// 
+
 const app = express();
 const PORT = 8080;
 
@@ -25,13 +34,13 @@ app.get("/admin/metrics",(req:Request,res:Response)=>{
 <html>
   <body>
     <h1>Welcome, Chirpy Admin</h1>
-    <p>Chirpy has been visited ${config.fileserverHits} times!</p>
+    <p>Chirpy has been visited ${config.api.fileserverHits} times!</p>
   </body> 
 </html>
 `);
 })
 app.post("/admin/reset", (req: Request, res: Response) => {
-  config.fileserverHits = 0; 
+  config.api.fileserverHits = 0; 
   res
     .set("Content-Type", "text/plain; charset=utf-8")
     .send("Hits reset to 0");
