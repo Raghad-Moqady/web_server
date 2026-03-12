@@ -3,12 +3,15 @@ import { middlewareLogResponses } from "./middlewareLogResponses.js";
 import { middlewareMetricsInc } from "./middlewareMetricsInc.js";
 import { config } from "./config.js";
 import { errorHandler } from "./errorMiddleware.js";
-import { BadRequestError } from './customErrorClasses.js';
+import { BadRequestError, NotFoundError } from './customErrorClasses.js';
+
 
 // Automatic Migrations
 import postgres from "postgres";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { createUser, deleteAllUsers } from "./db/queries/users.js";
+import { createChirp, getAllChirps, getChirpById } from "./db/queries/chirps.js";
 
 const migrationClient = postgres(config.db.url, { max: 1 });
 await migrate(drizzle(migrationClient), config.db.migrationConfig);
@@ -39,87 +42,72 @@ app.get("/admin/metrics",(req:Request,res:Response)=>{
 </html>
 `);
 })
-app.post("/admin/reset", (req: Request, res: Response) => {
-  config.api.fileserverHits = 0; 
-  res
-    .set("Content-Type", "text/plain; charset=utf-8")
-    .send("Hits reset to 0");
-});
-// app.post("/api/validate_chirp", (req: Request, res: Response) => {
-//   let body = "";
-//   req.on("data", (chunk) => {
-//     body += chunk;
-//   });
-//   req.on("end", () => {
-//     try {
-//       const parsed = JSON.parse(body);
-
-//       const chirp = parsed.body;
-
-//       if (!chirp) {
-//         res.status(400).json({
-//           error: "Something went wrong"
-//         });
-//         return;
-//       }
-
-//       if (chirp.length > 140) {
-//         res.status(400).json({
-//           error: "Chirp is too long"
-//         });
-//         return;
-//       }
-
-//       res.status(200).json({
-//         valid: true
-//       });
-
-//     } catch (err) {
-//       res.status(400).json({
-//         error: "Invalid JSON"
-//       });
-//     }
-//   });
-
-// });
-app.post("/api/validate_chirp", (req: Request, res: Response,next:NextFunction) => {
-
-  type parameters = {
-    body: string;
-  };
-
-  const params: parameters = req.body;
-
-  try{
-  if (!params.body) {
-    res.status(400).json({
-      error: "Something went wrong"
-    });
-    return;
+app.post("/admin/reset", async(req: Request, res: Response) => {
+   if (config.api.platform !== "dev") {
+    return res.status(403).send("Forbidden");
   }
- if (params.body.length > 140) {
+  await deleteAllUsers();
+  res.send("All users deleted");
+});
+app.post("/api/chirps", async (req, res, next:NextFunction) => {
+
+  const { body, userId } = req.body; 
+  
+  try{
+ if (!body) {
+      throw new BadRequestError("Chirp body is required");
+    }
+
+    if (!userId) {
+      throw new BadRequestError("User ID is required");
+    }
+ if (body.length > 140) {
     throw new BadRequestError("Chirp is too long. Max length is 140");
   }
 
   const profaneWords = ["kerfuffle", "sharbert", "fornax"]; 
-  const words = params.body.split(" ");
-  const cleanedWords = words.map((word) => {
+  const words = body.split(" ");
+  const cleanedWords = words.map((word:string) => {
     if (profaneWords.includes(word.toLowerCase())) {
       return "****";
     }
     return word;
   });
   const cleanedBody = cleanedWords.join(" ");
- 
-  res.status(200).json({
-    cleanedBody: cleanedBody
-  });
+  const chirp = await createChirp(cleanedBody, userId);
+
+  res.status(201).json(chirp);
+  
 }catch(err){
    next(err);
-}
- 
-
+}  
 });
+app.get("/api/chirps", async (req, res, next:NextFunction) => {
+ try {
+    const chirps = await getAllChirps();
+    res.status(200).json(chirps);
+  } catch (err) {
+    next(err);
+  }
+});
+app.get("/api/chirps/:chirpId", async (req, res, next:NextFunction) => {
+ try {
+    const {chirpId} = req.params; 
+    const chirp = await getChirpById(chirpId);
+    if(!chirp){
+      throw new NotFoundError("Chirp is Not Found");
+    }
+    res.status(200).json(chirp);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/users", async (req: Request, res: Response) => {
+  const { email } = req.body;
+  const newUser = await createUser({ email });
+  res.status(201).json(newUser);
+}); 
 app.use("/app",middlewareMetricsInc);
 app.use("/app", express.static("./src/app"));
 app.use(errorHandler);

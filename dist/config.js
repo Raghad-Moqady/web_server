@@ -5,7 +5,16 @@ function envOrThrow(key) {
         throw new Error(`Missing environment variable: ${key}`);
     return value;
 }
+export const migrationConfig = {
+    migrationsFolder: "./src/db/migrations",
+};
 export const config = {
-    dbURL: envOrThrow("DB_URL"),
-    fileserverHits: 0
+    api: {
+        fileserverHits: 0,
+        platform: process.env["PLATFORM"],
+    },
+    db: {
+        url: envOrThrow("DB_URL"),
+        migrationConfig,
+    },
 };
