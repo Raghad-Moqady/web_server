@@ -11,7 +11,7 @@ import postgres from "postgres";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { createUser, deleteAllUsers, findByEmail, updateAuthedUser, upgrade } from "./db/queries/users.js";
-import { createChirp, deleteChirp, getAllChirps, getChirpById } from "./db/queries/chirps.js";
+import { createChirp, deleteChirp, getAllChirps, getAllChirpsForAuthorId, getChirpById } from "./db/queries/chirps.js";
 import { checkPasswordHash, getAPIKey, getBearerToken, hashPassword, makeJWT, makeRefreshToken, validateJWT } from "./auth.js";
 import { NewUser } from "./db/schema.js";
 import { createRefreshToken, getRefreshToken, revokeRefreshToken } from "./db/queries/auth.js";
@@ -83,7 +83,23 @@ app.post("/api/chirps", async (req, res, next:NextFunction) => {
 });
 app.get("/api/chirps", async (req, res, next:NextFunction) => {
  try {
-    const chirps = await getAllChirps();
+    let authorId = "";
+    let chirps;
+    const authorIdQuery = req.query.authorId;
+    const sortValue= req.query.sort;
+    if (typeof authorIdQuery === "string") {
+      authorId = authorIdQuery;
+    }
+    if(authorId){
+      chirps= await getAllChirpsForAuthorId(authorId);
+    }else{
+      chirps = await getAllChirps();
+    }
+    if(sortValue==="desc"){
+      chirps = chirps.sort((a, b) => {
+      return b.createdAt.getTime() - a.createdAt.getTime();
+    });
+    }
     res.status(200).json(chirps);
   } catch (err) {
     next(err);
