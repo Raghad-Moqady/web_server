@@ -12,9 +12,13 @@ export const config = {
     api: {
         fileserverHits: 0,
         platform: process.env["PLATFORM"],
+        key: process.env["POLKA_KEY"],
     },
     db: {
         url: envOrThrow("DB_URL"),
         migrationConfig,
+    },
+    auth: {
+        jwtSecret: envOrThrow("JWT_SECRET"),
     },
 };

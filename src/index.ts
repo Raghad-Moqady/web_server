@@ -3,33 +3,31 @@ import { middlewareLogResponses } from "./middlewareLogResponses.js";
 import { middlewareMetricsInc } from "./middlewareMetricsInc.js";
 import { config } from "./config.js";
 import { errorHandler } from "./errorMiddleware.js";
-import { BadRequestError, NotFoundError } from './customErrorClasses.js';
+import { BadRequestError, ForbiddenError, NotFoundError, UnauthorizedError } from './customErrorClasses.js';
 
 
 // Automatic Migrations
 import postgres from "postgres";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { createUser, deleteAllUsers } from "./db/queries/users.js";
-import { createChirp, getAllChirps, getChirpById } from "./db/queries/chirps.js";
+import { createUser, deleteAllUsers, findByEmail, updateAuthedUser, upgrade } from "./db/queries/users.js";
+import { createChirp, deleteChirp, getAllChirps, getChirpById } from "./db/queries/chirps.js";
+import { checkPasswordHash, getAPIKey, getBearerToken, hashPassword, makeJWT, makeRefreshToken, validateJWT } from "./auth.js";
+import { NewUser } from "./db/schema.js";
+import { createRefreshToken, getRefreshToken, revokeRefreshToken } from "./db/queries/auth.js";
 
 const migrationClient = postgres(config.db.url, { max: 1 });
 await migrate(drizzle(migrationClient), config.db.migrationConfig);
 // 
-
 const app = express();
 const PORT = 8080;
-
 app.use(express.json());
 app.use(middlewareLogResponses);
-
- 
 app.get("/api/healthz", (req: Request, res: Response) => {
   res
     .set("Content-Type", "text/plain; charset=utf-8")
     .send("OK");
 });
-
 app.get("/admin/metrics",(req:Request,res:Response)=>{
   res
     .set("Content-Type", "text/html; charset=utf-8")
@@ -50,10 +48,11 @@ app.post("/admin/reset", async(req: Request, res: Response) => {
   res.send("All users deleted");
 });
 app.post("/api/chirps", async (req, res, next:NextFunction) => {
-
-  const { body, userId } = req.body; 
-  
   try{
+    const token = getBearerToken(req);
+    const userId = validateJWT(token, config.auth.jwtSecret);
+
+  const { body } = req.body; 
  if (!body) {
       throw new BadRequestError("Chirp body is required");
     }
@@ -102,12 +101,143 @@ app.get("/api/chirps/:chirpId", async (req, res, next:NextFunction) => {
     next(err);
   }
 });
-
 app.post("/api/users", async (req: Request, res: Response) => {
-  const { email } = req.body;
-  const newUser = await createUser({ email });
-  res.status(201).json(newUser);
+  const { email,password } = req.body;
+  const hashedPassword =await hashPassword(password);
+  const newUser = await createUser(email,hashedPassword);
+  type UserResponse = Omit<typeof newUser, "hashedPassword">;
+  const {...response }: UserResponse = newUser;
+  res.status(201).json(response);
 }); 
+app.post("/api/login", async (req:Request,res:Response)=>{
+   const {email,password,expiresInSeconds}=req.body;
+   const user= await findByEmail(email);
+   if(!user){
+      throw new UnauthorizedError("incorrect email or password");
+   }
+   if(! await checkPasswordHash(password,user.hashedPassword)){
+     throw new UnauthorizedError("incorrect email or password");
+   }
+    
+    let expiresIn = 60 * 60;  
+
+    if (expiresInSeconds) {
+      expiresIn = Math.min(expiresInSeconds, 60 * 60);
+    }
+
+  const token = makeJWT(user.id, expiresIn, config.auth.jwtSecret); 
+  const refreshToken = makeRefreshToken(); 
+  await createRefreshToken(refreshToken, user.id);
+  
+  type UserResponse = Omit<typeof user, "hashedPassword">;
+  const {isChirpyRed,...response }: UserResponse = user;
+   res.status(200).json({response,token,refreshToken,isChirpyRed,email,});
+});
+app.post("/api/refresh", async (req, res) => {
+  try {
+    const token = getBearerToken(req);
+
+    const stored = await getRefreshToken(token);
+
+    if (
+      !stored ||
+      stored.revokedAt ||
+      stored.expiresAt < new Date()
+    ) {
+      return res.status(401).json({ error: "invalid token" });
+    }
+
+    const accessToken = makeJWT(
+      stored.userId,
+      60 * 60,
+      config.auth.jwtSecret
+    );
+
+    res.status(200).json({ token: accessToken });
+  } catch {
+    res.status(401).json({ error: "invalid token" });
+  }
+});
+app.post("/api/revoke", async (req, res) => {
+  try {
+    const token = getBearerToken(req);
+
+    await revokeRefreshToken(token);
+
+    res.status(204).send();
+  } catch {
+  res.status(401).json({ error: "invalid token" });
+}
+});
+app.put("/api/users", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+     const token = getBearerToken(req);
+     const userId = validateJWT(token, config.auth.jwtSecret);
+     if (!userId) throw new UnauthorizedError("Invalid token");
+
+    const { email, password } = req.body;
+    if (!email || !password) {
+      throw new BadRequestError("Email and password are required");
+    }
+
+     const hashedPassword = await hashPassword(password);
+
+    const updatedUser= await updateAuthedUser(email,hashedPassword,userId);
+      
+    if (!updatedUser) {
+      throw new BadRequestError("User not found");
+    }
+   type UserResponse = Omit<typeof updatedUser, "hashedPassword">;
+  const {...response }: UserResponse = updatedUser;
+  
+    res.status(200).json(response);
+
+  } catch (err: any) {
+     
+    next(err);
+  }
+});
+app.delete("/api/chirps/:chirpId", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+     const token = getBearerToken(req);
+     const userId = validateJWT(token, config.auth.jwtSecret);
+     const chirpId = req.params.chirpId as string;
+     const chirp = await getChirpById(chirpId);
+    if (!chirp) {
+      throw new NotFoundError("Chirp not found");
+    }
+    if (chirp.userId !== userId) {
+       throw new ForbiddenError("Forbidden");
+    }
+
+    await deleteChirp(chirpId);
+
+    res.status(204).send();
+
+  } catch (err) {
+    next(err);
+  }
+});
+app.post("/api/polka/webhooks", async(req:Request,res:Response,next:NextFunction)=>{
+     try{
+       if(getAPIKey(req)!== config.api.key){
+        throw new UnauthorizedError("");
+       }
+        const {event,data} = req.body; 
+        const {userId} = data;
+        if(event!== "user.upgraded"){
+          res.status(204).send();
+        }else if(event  === "user.upgraded"){
+            const updatedUser = await upgrade(userId);
+             if (!updatedUser) {
+                throw new NotFoundError("User not found");
+             }
+            return res.status(204).send(); 
+        }
+     }catch(err){
+      next(err);
+     }
+});
 app.use("/app",middlewareMetricsInc);
 app.use("/app", express.static("./src/app"));
 app.use(errorHandler);
